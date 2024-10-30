@@ -1,13 +1,25 @@
 import ddf.minim.*;
 import ddf.minim.analysis.*;
 import peasy.*;
+import processing.sound.*;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.ArrayList;
+
+final int CUBE_SIZE = 400;
+final int PARTICLES_PER_LAYER = 512;
+final int LAYERS = 64;
+final float Y_MIN = 50.0f;  // Hz
+final float Y_MAX = 1000.0f; // Hz
+final int SAMPLE_RATE = 44100;
+final int BUFFER_SIZE = 1024;
+
 
 VisualizationManager visManager;
 
 void setup() {
-    size(800, 800, P3D);
+    // Can't use static vars here for some reason
+    size(1400, 1400, P3D);
     visManager = new VisualizationManager(this);
     frameRate(60);
 }
@@ -18,16 +30,24 @@ void draw() {
 }
 
 class VisualizationManager {
-    private AudioProcessor audioProcessor;
+    private TestSignalAnalyzer audioAnalyzer;
+    //private AudioFileAnalyzer audioAnalyzer;
+
+    private PeasyCam cam;
     private Hypercube cube;
     private TimeHistoryManager timeHistory;
-    private PeasyCam cam;
     private ParticleRenderer renderer;
     
     public VisualizationManager(PApplet parent) {
-        cube = new Hypercube(512, 64);
-        audioProcessor = new AudioProcessor(parent, cube);
-        timeHistory = new TimeHistoryManager(cube.NumLayers, cube.GridSize);
+        cube = new Hypercube(CUBE_SIZE, PARTICLES_PER_LAYER, LAYERS, Y_MIN, Y_MAX);
+        audioAnalyzer = new TestSignalAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
+        //audioAnalyzer = new AudioFileAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
+        //audioAnalyzer.loadFile("test.wav");
+        //audioAnalyzer.play(true);
+
+        cube.initSmoothSpectrum(audioAnalyzer.getSpecSize());
+
+        timeHistory = new TimeHistoryManager(cube);
         renderer = new ParticleRenderer(cube);
         
         initializeCamera(parent);
@@ -41,9 +61,9 @@ class VisualizationManager {
     }
 
     public void update() {
-        audioProcessor.update();
-        float currentFreq = audioProcessor.getCurrentFrequency();
-        float stereoWidth = audioProcessor.getStereoWidth();
+        audioAnalyzer.update();
+        float currentFreq = audioAnalyzer.getCurrentFrequency();
+        float stereoWidth = audioAnalyzer.getStereoWidth();
         timeHistory.update(currentFreq, stereoWidth);
     }
 
@@ -54,10 +74,10 @@ class VisualizationManager {
         stroke(255, 0, 255);
         strokeWeight(2);
         noFill();
-        box(cube.CubeSize);
+        box(cube.cubeSize);
         
         // Render particles
-        renderer.render(timeHistory, audioProcessor.getStereoWidth());
+        renderer.render(timeHistory, audioAnalyzer.getStereoWidth());
         
         drawFPS();
     }
@@ -65,94 +85,296 @@ class VisualizationManager {
     private void drawFrame() {
         stroke(255, 0, 255);
         noFill();
-        box(cube.CubeSize);
+        box(cube.cubeSize);
     }
     
     private void drawFPS() {
         fill(255);
         textSize(16);
         textAlign(RIGHT, TOP);
-        text("FPS: " + int(frameRate), cube.CubeSize / 2, cube.CubeSize / 2, cube.CubeSize / 2);
+        text("FPS: " + int(frameRate), cube.cubeSize / 2, cube.cubeSize / 2, cube.cubeSize / 2);
     }
 }
 
-class AudioProcessor {
-    private Minim minim;
-    private AudioOutput out;
-    private FFT fftLeft, fftRight;
-    private FrequencySweeper sweeper;
+class Hypercube {
+    public static final float MIN_AMPLITUDE = 1e-6f;
+    public static final float REF_AMPLITUDE = 1.0f;
+
+    public int cubeSize = 400;
+    public int numParticles = 256;
+    public int gridSize = (int) sqrt(numParticles);
+    public int numLayers = 21;
     
-    final int SAMPLE_RATE = 44100;
-    final int BUFFER_SIZE = 1024;
+    public float yMin = 50.0;    // Hz - Match sweep minimum
+    public float yMax = 1000.0;  // Hz - Match sweep maximum
+    public float[] smoothedSpectrum;
     
-    public AudioProcessor(PApplet parent, Hypercube cube) {
+    public Hypercube(int cubeSize, int numParticles, int numLayers, float yMin, float yMax) {
+        this.numParticles = numParticles;
+        this.gridSize = (int) sqrt(numParticles);
+        this.numLayers = numLayers;
+        this.yMin = yMin;
+        this.yMax = yMax;
+    }
+    
+    public void initSmoothSpectrum(int specSize) {
+        smoothedSpectrum = new float[specSize];
+    }
+
+    public final float toDb(float amplitude) {
+        float absAmplitude = Math.abs(amplitude);
+        float safeAmplitude = Math.max(absAmplitude, MIN_AMPLITUDE);
+        return 20 * (float)Math.log10(safeAmplitude / REF_AMPLITUDE);
+    }
+}
+
+abstract class BaseAudioAnalyzer {
+    protected float yMin;
+    protected float yMax;
+    protected int sampleRate;
+    protected int bufferSize;
+
+    protected float[] bufferLeft;
+    protected float[] bufferRight;
+
+    protected Minim minim;
+    protected ddf.minim.analysis.FFT fftLeft, fftRight;
+
+    protected float currentFrequency = 0.0f;
+    protected float currentStereoWidth = 0.0f;
+    private float prevStereoWidth = 0.0f;
+    
+    public BaseAudioAnalyzer(PApplet parent, float yMin, float yMax, int sampleRate, int bufferSize) {
+        this.yMin = yMin;
+        this.yMax = yMax;
+        this.sampleRate = sampleRate;
+        this.bufferSize = bufferSize;
+
+        bufferLeft = new float[bufferSize];
+        bufferRight = new float[bufferSize];
+
         minim = new Minim(parent);
-        out = minim.getLineOut(Minim.STEREO, BUFFER_SIZE);
-        
         initializeFFT();
-        sweeper = new FrequencySweeper(cube.YMin, cube.YMax);
-        cube.InitSmoothSpectrum(fftLeft.specSize());
-    }
-    
-    public void update() {
-        sweeper.update(frameRate);
-        float[] bufferLeft = new float[BUFFER_SIZE];
-        float[] bufferRight = new float[BUFFER_SIZE];
-        generateAudioBuffer(bufferLeft, bufferRight);
-        processFFT(bufferLeft, bufferRight);
-    }
-    
-    private void generateAudioBuffer(float[] bufferLeft, float[] bufferRight) {
-        float phaseIncrement = TWO_PI * sweeper.getCurrentFrequency() / SAMPLE_RATE;
-        float phase = sweeper.getPhase();
-        float stereoWidth = sweeper.getStereoWidth();
         
-        for (int i = 0; i < bufferLeft.length; i++) {
-            float signal = 0.5 * sin(phase);
-            
-            bufferLeft[i] = signal * (1.0 - stereoWidth * 0.5);
-            bufferRight[i] = signal * (1.0 + stereoWidth * 0.5);
-            
-            phase += phaseIncrement;
-            if (phase > TWO_PI) phase -= TWO_PI;
-        }
-        
-        sweeper.setPhase(phase);
+        System.out.println("=== Initialization Parameters ===");
+        System.out.println("Y-axis range: " + yMin + " to " + yMax);
+        System.out.println("Sample rate: " + sampleRate + " Hz");
+        System.out.println("Buffer size: " + bufferSize);
+        System.out.println("FFT spec size: " + fftLeft.specSize());
+        System.out.println("==============================");
     }
     
-    private void initializeFFT() {
-        fftLeft = new FFT(BUFFER_SIZE, SAMPLE_RATE);
-        fftRight = new FFT(BUFFER_SIZE, SAMPLE_RATE);
-        fftLeft.window(FFT.HAMMING);
-        fftRight.window(FFT.HAMMING);
+    public abstract void play(boolean loop);
+    public abstract void pause();
+    public abstract void update();
+    
+    public int getSpecSize() { return fftLeft.specSize(); }
+    public float getCurrentFrequency() { return currentFrequency; }
+    public float getStereoWidth() { return currentStereoWidth; }
+    
+    protected void initializeFFT() {
+        fftLeft = new ddf.minim.analysis.FFT(bufferSize, sampleRate);
+        fftRight = new ddf.minim.analysis.FFT(bufferSize, sampleRate);
+        fftLeft.window(ddf.minim.analysis.FFT.HAMMING);
+        fftRight.window(ddf.minim.analysis.FFT.HAMMING);
     }
     
-    private void processFFT(float[] bufferLeft, float[] bufferRight) {
+    protected void processFFT(float[] bufferLeft, float[] bufferRight) {
         fftLeft.forward(bufferLeft);
         fftRight.forward(bufferRight);
+        
+        findBasicFrequency();
+        currentStereoWidth = calculateStereoWidth();
     }
     
-    public float getCurrentFrequency() { return sweeper.getCurrentFrequency(); }
-    public float getStereoWidth() { return sweeper.getStereoWidth(); }
+    private void findBasicFrequency() {
+        float maxAmp = 0;
+        int maxBin = 0;
+        
+        for (int i = 0; i < fftLeft.specSize(); i++) {
+            float amp = (fftLeft.getBand(i) + fftRight.getBand(i)) / 2;
+            if (amp > maxAmp) {
+                maxAmp = amp;
+                maxBin = i;
+            }
+        }
+        
+        float rawFreq = maxBin * sampleRate / (float)bufferSize;
+        currentFrequency = constrain(rawFreq, yMin, yMax);
+    }
+    
+    private float calculateStereoWidth() {
+        float totalEnergy = 0;
+        float stereoDifference = 0;
+        float significantBands = 0;
+        float noiseThreshold = 0.05f; // Increased threshold for noise reduction
+        
+        // Focus on the most energetic part of the spectrum
+        for (int i = 0; i < fftLeft.specSize(); i++) {
+            float leftAmp = fftLeft.getBand(i);
+            float rightAmp = fftRight.getBand(i);
+            float avgAmp = (leftAmp + rightAmp) / 2;
+            
+            // Only consider bands with significant energy
+            if (avgAmp > noiseThreshold) {
+                float difference = abs(leftAmp - rightAmp);
+                
+                // Calculate normalized difference
+                if (avgAmp > 0) {
+                    float normalizedDiff = difference / avgAmp;
+                    
+                    // Weight the difference by the band's energy
+                    stereoDifference += normalizedDiff * avgAmp;
+                    totalEnergy += avgAmp;
+                    significantBands++;
+                }
+            }
+        }
+        
+        // Only update stereo width if we have significant signal
+        if (significantBands > 0 && totalEnergy > noiseThreshold) {
+            float newStereoWidth = (stereoDifference / totalEnergy);
+            
+            // Smooth the transition
+            newStereoWidth = prevStereoWidth + (newStereoWidth - prevStereoWidth) * 0.3f;
+            
+            // Update previous value for next frame
+            prevStereoWidth = newStereoWidth;
+            
+            return constrain(newStereoWidth, 0, 1);
+        } else {
+            // If no significant signal, gradually return to center
+            prevStereoWidth *= 0.95f;
+            return prevStereoWidth;
+        }
+    }
+}
+
+class AudioFileAnalyzer extends BaseAudioAnalyzer {
+    private AudioPlayer audioPlayer;
+    
+    public AudioFileAnalyzer(PApplet parent, float yMin, float yMax, int sampleRate, int bufferSize) {
+        super(parent, yMin, yMax, sampleRate, bufferSize);
+    }
+    
+    public void loadFile(String filename) {
+        if (audioPlayer != null) {
+            audioPlayer.close();
+        }
+        audioPlayer = minim.loadFile(filename, BUFFER_SIZE);
+    }
+    
+    @Override
+    public void play(boolean loop) {
+        if (audioPlayer != null) {
+            if (loop) {
+                audioPlayer.loop();
+            } else {
+                audioPlayer.play();
+            }
+        }
+    }
+    
+    @Override
+    public void pause() {
+        if (audioPlayer != null) {
+            audioPlayer.pause();
+        }
+    }
+    
+    @Override
+    public void update() {
+        if (audioPlayer != null && audioPlayer.isPlaying()) {
+            bufferLeft = audioPlayer.left.toArray();
+            bufferRight = audioPlayer.right.toArray();
+            processFFT(bufferLeft, bufferRight);
+        }
+    }
+}
+
+class TestSignalAnalyzer extends BaseAudioAnalyzer {
+    private Minim minim;
+    private AudioOutput out;
+    private FrequencySweeper sweeper;
+    private float phase = 0;
+    private boolean isPlaying = false;
+    
+    public TestSignalAnalyzer(PApplet parent, float yMin, float yMax, int sampleRate, int bufferSize) {
+        super(parent, yMin, yMax, sampleRate, bufferSize);
+        minim = new Minim(parent);
+        out = minim.getLineOut(Minim.STEREO, bufferSize);
+        sweeper = new FrequencySweeper(yMin, yMax, sampleRate);
+
+        play(true);
+    }
+    
+    @Override
+    public void play(boolean loop) {
+        isPlaying = true;
+        sweeper.play();
+    }
+    
+    @Override
+    public void pause() {
+        isPlaying = false;
+        sweeper.pause();
+    }
+
+    @Override
+    public void update() {
+        if (!isPlaying) return;
+        
+        sweeper.update(frameRate);
+        // Moving this to actually calculate it with the fft
+        //currentFrequency = sweeper.getCurrentFrequency();
+        //currentStereoWidth = sweeper.getStereoWidth();
+        sweeper.generateAudioBuffer(bufferLeft, bufferRight);
+        
+        // // Send audio to output
+        // for (int i = 0; i < BUFFER_SIZE; i++) {
+        //     out.left.write(bufferLeft[i]);
+        //     out.right.write(bufferRight[i]);
+        // }
+        
+        processFFT(bufferLeft, bufferRight);
+    }
 }
 
 class FrequencySweeper {
     private float currentFreq;
     private float minFreq;
     private float maxFreq;
+    private int sampleRate;
     private float sweepDuration = 1.0;
     private float sweepTime = 0.0;
     private boolean sweepingUp = true;
     private float stereoWidth = 0.0;
     private float phase = 0.0;
+    private boolean isPlaying = true;
     
-    public FrequencySweeper(float minFreq, float maxFreq) {
+    public FrequencySweeper(float minFreq, float maxFreq, int sampleRate) {
         this.minFreq = minFreq;
         this.maxFreq = maxFreq;
         this.currentFreq = minFreq;
+        this.sampleRate = sampleRate;
     }
-    
+
+    public float getCurrentFrequency() { return currentFreq; }
+    public float getStereoWidth() { return stereoWidth; }
+    public float getPhase() { return phase; }
+    public void setPhase(float phase) { this.phase = phase; }
+
+    public void play() {
+        isPlaying = true;
+    }
+
+    public void pause() {
+        isPlaying = false;
+    }
+
     public void update(float frameRate) {
+        if(!isPlaying) return;
+
         float timeIncrement = 1.0 / frameRate;
         sweepTime += timeIncrement;
         
@@ -174,11 +396,24 @@ class FrequencySweeper {
             stereoWidth = 1.0 - progress;
         }
     }
-    
-    public float getCurrentFrequency() { return currentFreq; }
-    public float getStereoWidth() { return stereoWidth; }
-    public float getPhase() { return phase; }
-    public void setPhase(float phase) { this.phase = phase; }
+
+    private void generateAudioBuffer(float[] bufferLeft, float[] bufferRight) {
+        float phaseIncrement = TWO_PI * getCurrentFrequency() / sampleRate;
+        float phase = getPhase();
+        float stereoWidth = getStereoWidth();
+        
+        for (int i = 0; i < bufferLeft.length; i++) {
+            float signal = 0.5 * sin(phase);
+            
+            bufferLeft[i] = signal * (1.0 - stereoWidth * 0.5);
+            bufferRight[i] = signal * (1.0 + stereoWidth * 0.5);
+            
+            phase += phaseIncrement;
+            if (phase > TWO_PI) phase -= TWO_PI;
+        }
+        
+        setPhase(phase);
+    }
 }
 
 class TimeHistoryManager {
@@ -189,12 +424,12 @@ class TimeHistoryManager {
     private ParticleGrid grid;
     private float currentStereoWidth = 0.0;
     
-    public TimeHistoryManager(int numLayers, int gridSize) {
-        timeHistory = new TimeSlice[numLayers];
-        for (int i = 0; i < numLayers; i++) {
-            timeHistory[i] = new TimeSlice(gridSize);
+    public TimeHistoryManager(Hypercube cube) {
+        timeHistory = new TimeSlice[cube.numLayers];
+        for (int i = 0; i < cube.numLayers; i++) {
+            timeHistory[i] = new TimeSlice(cube.gridSize);
         }
-        grid = new ParticleGrid(new Hypercube(gridSize * gridSize, numLayers));
+        grid = new ParticleGrid(cube);
     }
     
     public void update(float currentFreq, float stereoWidth) {
@@ -340,35 +575,35 @@ class ParticleRenderer {
     }
 
     private void initializeStaticPositions() {
-        staticXPositions = new float[cube.GridSize];
-        staticYPositions = new float[cube.GridSize];
-        staticZPositions = new float[cube.NumLayers];
+        staticXPositions = new float[cube.gridSize];
+        staticYPositions = new float[cube.gridSize];
+        staticZPositions = new float[cube.numLayers];
         
-        float halfSize = cube.CubeSize / 2.0f;
+        float halfSize = cube.cubeSize / 2.0f;
         
-        for (int i = 0; i < cube.GridSize; i++) {
-            staticXPositions[i] = map(i, 0, cube.GridSize - 1, -halfSize, halfSize);
-            staticYPositions[i] = map(i, 0, cube.GridSize - 1, halfSize, -halfSize);
+        for (int i = 0; i < cube.gridSize; i++) {
+            staticXPositions[i] = map(i, 0, cube.gridSize - 1, -halfSize, halfSize);
+            staticYPositions[i] = map(i, 0, cube.gridSize - 1, halfSize, -halfSize);
         }
         
-        for (int i = 0; i < cube.NumLayers; i++) {
-            staticZPositions[i] = map(i, 0, cube.NumLayers - 1, halfSize, -halfSize);
+        for (int i = 0; i < cube.numLayers; i++) {
+            staticZPositions[i] = map(i, 0, cube.numLayers - 1, halfSize, -halfSize);
         }
     }
 
     private void preCalculateSortOrder() {
-        int totalParticles = cube.NumLayers * cube.GridSize * cube.GridSize;
+        int totalParticles = cube.numLayers * cube.gridSize * cube.gridSize;
         staticSortIndices = new int[totalParticles];
         
         ArrayList<ParticlePosition> positions = new ArrayList<ParticlePosition>();
         
-        for (int layer = 0; layer < cube.NumLayers; layer++) {
+        for (int layer = 0; layer < cube.numLayers; layer++) {
             float z = staticZPositions[layer];
             
-            for (int row = 0; row < cube.GridSize; row++) {
-                for (int col = 0; col < cube.GridSize; col++) {
-                    int index = (layer * cube.GridSize * cube.GridSize) + 
-                              (row * cube.GridSize) + col;
+            for (int row = 0; row < cube.gridSize; row++) {
+                for (int col = 0; col < cube.gridSize; col++) {
+                    int index = (layer * cube.gridSize * cube.gridSize) + 
+                              (row * cube.gridSize) + col;
                     positions.add(new ParticlePosition(index, z));
                 }
             }
@@ -392,17 +627,17 @@ class ParticleRenderer {
         particleCount = 0;
         
         for (int sortedIdx : staticSortIndices) {
-            int totalPerLayer = cube.GridSize * cube.GridSize;
+            int totalPerLayer = cube.gridSize * cube.gridSize;
             int layer = sortedIdx / totalPerLayer;
             int remainder = sortedIdx % totalPerLayer;
-            int row = remainder / cube.GridSize;
-            int col = remainder % cube.GridSize;
+            int row = remainder / cube.gridSize;
+            int col = remainder % cube.gridSize;
             
             TimeSlice slice = timeHistory.getSlice(layer);
             float size = slice.getSizeAt(row, col);
             
             if (size > ParticleGrid.BASE_SIZE) {
-                float xPos = (float)col / (cube.GridSize - 1);
+                float xPos = (float)col / (cube.gridSize - 1);
                 float opacity = calculateStereoFieldOpacity(xPos, stereoWidth);
                 
                 if (opacity > OPACITY_THRESHOLD && particleCount < MAX_PARTICLES) {
@@ -491,26 +726,26 @@ class ParticleGrid {
     }
 
     private void initializeGridPositions(Hypercube cube) {
-        xPositions = new float[cube.GridSize];
-        yPositions = new float[cube.GridSize];
-        zPositions = new float[cube.NumLayers];
-        rowFrequencies = new float[cube.GridSize];
-        stereoPositions = new float[cube.GridSize];
-        centerDistances = new float[cube.GridSize];
+        xPositions = new float[cube.gridSize];
+        yPositions = new float[cube.gridSize];
+        zPositions = new float[cube.numLayers];
+        rowFrequencies = new float[cube.gridSize];
+        stereoPositions = new float[cube.gridSize];
+        centerDistances = new float[cube.gridSize];
         
-        float halfSize = cube.CubeSize / 2;
+        float halfSize = cube.cubeSize / 2;
         
-        for (int i = 0; i < cube.GridSize; i++) {
+        for (int i = 0; i < cube.gridSize; i++) {
             // Center grid around origin
-            xPositions[i] = map(i, 0, cube.GridSize - 1, -halfSize, halfSize);
-            yPositions[i] = map(i, 0, cube.GridSize - 1, halfSize, -halfSize);
-            rowFrequencies[i] = cube.YMin * pow(cube.YMax/cube.YMin, (float)i/(cube.GridSize-1));
-            stereoPositions[i] = (float)i / (cube.GridSize - 1);
+            xPositions[i] = map(i, 0, cube.gridSize - 1, -halfSize, halfSize);
+            yPositions[i] = map(i, 0, cube.gridSize - 1, halfSize, -halfSize);
+            rowFrequencies[i] = cube.yMin * pow(cube.yMax/cube.yMin, (float)i/(cube.gridSize-1));
+            stereoPositions[i] = (float)i / (cube.gridSize - 1);
             centerDistances[i] = abs(stereoPositions[i] - 0.5) * 2.0;
         }
         
-        for (int i = 0; i < cube.NumLayers; i++) {
-            zPositions[i] = map(i, 0, cube.NumLayers - 1, halfSize, -halfSize);
+        for (int i = 0; i < cube.numLayers; i++) {
+            zPositions[i] = map(i, 0, cube.numLayers - 1, halfSize, -halfSize);
         }
     }
 }
@@ -552,35 +787,5 @@ class TimeSlice {
     
     public float getStereoFactorAt(int row, int col) {
         return stereoFactors[row][col];
-    }
-}
-
-class Hypercube {
-    public static final float MIN_AMPLITUDE = 1e-6f;
-    public static final float REF_AMPLITUDE = 1.0f;
-
-    public int CubeSize = 400;
-    public int NumParticles = 256;
-    public int GridSize = (int) sqrt(NumParticles);
-    public int NumLayers = 21;
-    
-    public float YMin = 50.0;    // Hz - Match sweep minimum
-    public float YMax = 1000.0;  // Hz - Match sweep maximum
-    public float[] smoothedSpectrum;
-    
-    public Hypercube(int numParticles, int numLayers) {
-        NumParticles = numParticles;
-        GridSize = (int) sqrt(numParticles);
-        NumLayers = numLayers;
-    }
-    
-    public void InitSmoothSpectrum(int specSize) {
-        smoothedSpectrum = new float[specSize];
-    }
-
-    public float ToDb(float amplitude) {
-        float absAmplitude = Math.abs(amplitude);
-        float safeAmplitude = Math.max(absAmplitude, MIN_AMPLITUDE);
-        return 20 * (float)Math.log10(safeAmplitude / REF_AMPLITUDE);
     }
 }
