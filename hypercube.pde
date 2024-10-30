@@ -143,25 +143,34 @@ abstract class BaseAudioAnalyzer {
     protected float currentFrequency = 0.0f;
     protected float currentStereoWidth = 0.0f;
     private float prevStereoWidth = 0.0f;
+    private float prevFrequency = 0.0f;
+    private static final float FREQ_SMOOTH = 0.3f;
     
     public BaseAudioAnalyzer(PApplet parent, float yMin, float yMax, int sampleRate, int bufferSize) {
         this.yMin = yMin;
         this.yMax = yMax;
         this.sampleRate = sampleRate;
-        this.bufferSize = bufferSize;
-
-        bufferLeft = new float[bufferSize];
-        bufferRight = new float[bufferSize];
+        
+        // Use a larger buffer size for better frequency resolution
+        // 4096 gives us ~10.8Hz resolution (44100/4096)
+        this.bufferSize = 4096;
+        
+        bufferLeft = new float[this.bufferSize];
+        bufferRight = new float[this.bufferSize];
 
         minim = new Minim(parent);
         initializeFFT();
         
-        System.out.println("=== Initialization Parameters ===");
-        System.out.println("Y-axis range: " + yMin + " to " + yMax);
+        float binResolution = (float)sampleRate / this.bufferSize;
+        System.out.println("=== FFT Parameters ===");
+        System.out.println("Y-axis range: " + yMin + " to " + yMax + " Hz");
         System.out.println("Sample rate: " + sampleRate + " Hz");
-        System.out.println("Buffer size: " + bufferSize);
+        System.out.println("Buffer size: " + this.bufferSize);
         System.out.println("FFT spec size: " + fftLeft.specSize());
-        System.out.println("==============================");
+        System.out.println("Frequency resolution: " + binResolution + " Hz/bin");
+        System.out.println("Minimum detectable frequency: " + binResolution + " Hz");
+        System.out.println("Time window: " + (1000f * this.bufferSize / sampleRate) + " ms");
+        System.out.println("====================");
     }
     
     public abstract void play(boolean loop);
@@ -175,8 +184,14 @@ abstract class BaseAudioAnalyzer {
     protected void initializeFFT() {
         fftLeft = new ddf.minim.analysis.FFT(bufferSize, sampleRate);
         fftRight = new ddf.minim.analysis.FFT(bufferSize, sampleRate);
-        fftLeft.window(ddf.minim.analysis.FFT.HAMMING);
-        fftRight.window(ddf.minim.analysis.FFT.HAMMING);
+        
+        // Use Blackman-Harris window for better frequency separation
+        fftLeft.window(ddf.minim.analysis.FFT.BLACKMAN);
+        fftRight.window(ddf.minim.analysis.FFT.BLACKMAN);
+        
+        // Increase average bands for smoother analysis
+        fftLeft.logAverages(22, 3);  // Start at 22Hz with 3 bands per octave
+        fftRight.logAverages(22, 3);
     }
     
     protected void processFFT(float[] bufferLeft, float[] bufferRight) {
@@ -191,39 +206,45 @@ abstract class BaseAudioAnalyzer {
         float maxAmp = 0;
         int maxBin = 0;
         
-        for (int i = 0; i < fftLeft.specSize(); i++) {
-            float amp = (fftLeft.getBand(i) + fftRight.getBand(i)) / 2;
+        // Start from bin 1 to avoid DC component
+        for (int i = 1; i < fftLeft.specSize(); i++) {
+            float leftAmp = fftLeft.getBand(i);
+            float rightAmp = fftRight.getBand(i);
+            float amp = (leftAmp + rightAmp) / 2;
+            
             if (amp > maxAmp) {
                 maxAmp = amp;
                 maxBin = i;
             }
         }
         
-        float rawFreq = maxBin * sampleRate / (float)bufferSize;
-        currentFrequency = constrain(rawFreq, yMin, yMax);
+        if (maxAmp > 0.01) {
+            // Convert bin to frequency
+            float rawFreq = maxBin * sampleRate / (float)bufferSize;
+            float newFreq = constrain(rawFreq, yMin, yMax);
+            
+            // Smooth the transition
+            currentFrequency = prevFrequency + (newFreq - prevFrequency) * FREQ_SMOOTH;
+            prevFrequency = currentFrequency;
+        }
     }
     
     private float calculateStereoWidth() {
         float totalEnergy = 0;
         float stereoDifference = 0;
         float significantBands = 0;
-        float noiseThreshold = 0.05f; // Increased threshold for noise reduction
+        float noiseThreshold = 0.05f;
         
-        // Focus on the most energetic part of the spectrum
         for (int i = 0; i < fftLeft.specSize(); i++) {
             float leftAmp = fftLeft.getBand(i);
             float rightAmp = fftRight.getBand(i);
             float avgAmp = (leftAmp + rightAmp) / 2;
             
-            // Only consider bands with significant energy
             if (avgAmp > noiseThreshold) {
                 float difference = abs(leftAmp - rightAmp);
                 
-                // Calculate normalized difference
                 if (avgAmp > 0) {
                     float normalizedDiff = difference / avgAmp;
-                    
-                    // Weight the difference by the band's energy
                     stereoDifference += normalizedDiff * avgAmp;
                     totalEnergy += avgAmp;
                     significantBands++;
@@ -231,19 +252,12 @@ abstract class BaseAudioAnalyzer {
             }
         }
         
-        // Only update stereo width if we have significant signal
         if (significantBands > 0 && totalEnergy > noiseThreshold) {
             float newStereoWidth = (stereoDifference / totalEnergy);
-            
-            // Smooth the transition
             newStereoWidth = prevStereoWidth + (newStereoWidth - prevStereoWidth) * 0.3f;
-            
-            // Update previous value for next frame
             prevStereoWidth = newStereoWidth;
-            
             return constrain(newStereoWidth, 0, 1);
         } else {
-            // If no significant signal, gradually return to center
             prevStereoWidth *= 0.95f;
             return prevStereoWidth;
         }
