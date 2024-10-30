@@ -278,7 +278,6 @@ class ParticlePosition implements Comparable<ParticlePosition> {
     
     @Override
     public int compareTo(ParticlePosition other) {
-        // Sort back-to-front
         return Float.compare(other.z, this.z);
     }
 }
@@ -297,13 +296,17 @@ class ParticleRenderer {
     private float[] sizeBuffer;
     private float[] alphaBuffer;
     private int[] sortIndices;
+    private int[] staticSortIndices;
     private int particleCount;
-    private int[] staticSortIndices;  // Pre-calculated sort order
+    
+    // Pre-calculated positions
+    private float[] staticXPositions;
+    private float[] staticYPositions;
+    private float[] staticZPositions;
     
     // Constants
     private static final float OPACITY_THRESHOLD = 0.05f;
     private static final int MAX_PARTICLES = 16384;
-    private static final int SORT_BUCKET_COUNT = 32;
     
     public ParticleRenderer(Hypercube cube) {
         this.cube = cube;
@@ -321,7 +324,9 @@ class ParticleRenderer {
         pgl = (PGraphicsOpenGL)g;
         initShaders();
         
-        // Pre-calculate static sort order
+        // Pre-calculate positions
+        initializeStaticPositions();
+        // Pre-calculate sort order
         preCalculateSortOrder();
     }
 
@@ -334,34 +339,43 @@ class ParticleRenderer {
         this.fieldSeparation = separation;
     }
 
+    private void initializeStaticPositions() {
+        staticXPositions = new float[cube.GridSize];
+        staticYPositions = new float[cube.GridSize];
+        staticZPositions = new float[cube.NumLayers];
+        
+        float halfSize = cube.CubeSize / 2.0f;
+        
+        for (int i = 0; i < cube.GridSize; i++) {
+            staticXPositions[i] = map(i, 0, cube.GridSize - 1, -halfSize, halfSize);
+            staticYPositions[i] = map(i, 0, cube.GridSize - 1, halfSize, -halfSize);
+        }
+        
+        for (int i = 0; i < cube.NumLayers; i++) {
+            staticZPositions[i] = map(i, 0, cube.NumLayers - 1, halfSize, -halfSize);
+        }
+    }
+
     private void preCalculateSortOrder() {
-        // Calculate total possible particles
         int totalParticles = cube.NumLayers * cube.GridSize * cube.GridSize;
         staticSortIndices = new int[totalParticles];
         
-        // Gather all particle positions
         ArrayList<ParticlePosition> positions = new ArrayList<ParticlePosition>();
         
         for (int layer = 0; layer < cube.NumLayers; layer++) {
-            float z = grid.getZPosition(layer);
+            float z = staticZPositions[layer];
             
             for (int row = 0; row < cube.GridSize; row++) {
-                float y = grid.getYPosition(row);
-                
                 for (int col = 0; col < cube.GridSize; col++) {
-                    float x = grid.getXPosition(col);
                     int index = (layer * cube.GridSize * cube.GridSize) + 
                               (row * cube.GridSize) + col;
-                    
                     positions.add(new ParticlePosition(index, z));
                 }
             }
         }
         
-        // Sort positions by Z back-to-front
         Collections.sort(positions);
         
-        // Store the sorted indices
         for (int i = 0; i < positions.size(); i++) {
             staticSortIndices[i] = positions.get(i).index;
         }
@@ -377,16 +391,13 @@ class ParticleRenderer {
     private void gatherVisibleParticles(TimeHistoryManager timeHistory, float stereoWidth) {
         particleCount = 0;
         
-        // Use pre-sorted order
         for (int sortedIdx : staticSortIndices) {
-            // Convert index back to layer, row, col
             int totalPerLayer = cube.GridSize * cube.GridSize;
             int layer = sortedIdx / totalPerLayer;
             int remainder = sortedIdx % totalPerLayer;
             int row = remainder / cube.GridSize;
             int col = remainder % cube.GridSize;
             
-            // Get the correct time slice for this layer
             TimeSlice slice = timeHistory.getSlice(layer);
             float size = slice.getSizeAt(row, col);
             
@@ -395,9 +406,9 @@ class ParticleRenderer {
                 float opacity = calculateStereoFieldOpacity(xPos, stereoWidth);
                 
                 if (opacity > OPACITY_THRESHOLD && particleCount < MAX_PARTICLES) {
-                    xBuffer[particleCount] = grid.getXPosition(col);
-                    yBuffer[particleCount] = grid.getYPosition(row);
-                    zBuffer[particleCount] = grid.getZPosition(layer);
+                    xBuffer[particleCount] = staticXPositions[col];
+                    yBuffer[particleCount] = staticYPositions[row];
+                    zBuffer[particleCount] = staticZPositions[layer];
                     sizeBuffer[particleCount] = size;
                     alphaBuffer[particleCount] = opacity * 255;
                     sortIndices[particleCount] = particleCount;
