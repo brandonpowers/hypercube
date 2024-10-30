@@ -301,10 +301,10 @@ class ParticleRenderer {
         pgl = (PGraphicsOpenGL)g;
         initShaders();
     }
-    
+
     private void initShaders() {
         pointShader = loadShader("point.frag", "point.vert");
-        pointShader.set("pointSize", 20.0f);  // Increased from 15.0 to 20.0
+        pointShader.set("pointSize", 20.0f);
     }
     
     public void setFieldSeparation(float separation) {
@@ -390,16 +390,31 @@ class ParticleRenderer {
     
     private void renderParticleBatch() {
         if (particleCount == 0) return;
-        
+
         shader(pointShader);
-        strokeWeight(1);
+        noStroke();
+        
+        float lastSize = -1;
+        float lastAlpha = -1;
         
         beginShape(POINTS);
         for (int i = 0; i < particleCount; i++) {
             int idx = sortIndices[i];
-            float alpha = alphaBuffer[idx] / 255.0f;
-            stroke(0, 255, 255, alphaBuffer[idx]);
-            strokeWeight(sizeBuffer[idx] * 2);
+            
+            // Only update size and color if they've changed
+            float currentSize = sizeBuffer[idx] * 3;
+            float currentAlpha = alphaBuffer[idx] * 0.8f;
+            
+            if (currentSize != lastSize) {
+                strokeWeight(currentSize);
+                lastSize = currentSize;
+            }
+            
+            if (currentAlpha != lastAlpha) {
+                stroke(0, 255, 255, currentAlpha);
+                lastAlpha = currentAlpha;
+            }
+            
             vertex(xBuffer[idx], yBuffer[idx], zBuffer[idx]);
         }
         endShape();
@@ -410,31 +425,15 @@ class ParticleRenderer {
     public void render(TimeHistoryManager timeHistory, float stereoWidth) {
         pushStyle();
         
-        // Particle rendering settings
         hint(ENABLE_DEPTH_TEST);
         hint(DISABLE_DEPTH_SORT);
         blendMode(ADD);
         ((PGraphicsOpenGL)g).smooth(4);
         
-        // Gather and sort particles
         gatherVisibleParticles(timeHistory, stereoWidth);
         sortParticles();
+        renderParticleBatch();
         
-        // Enable shader and render particles
-        shader(pointShader);
-        
-        beginShape(POINTS);
-        for (int i = 0; i < particleCount; i++) {
-            int idx = sortIndices[i];
-            float adjustedAlpha = alphaBuffer[idx] * 0.8;
-            stroke(0, 255, 255, adjustedAlpha);
-            strokeWeight(sizeBuffer[idx] * 3);
-            vertex(xBuffer[idx], yBuffer[idx], zBuffer[idx]);
-        }
-        endShape();
-        
-        // Reset state
-        resetShader();
         blendMode(BLEND);
         popStyle();
     }
