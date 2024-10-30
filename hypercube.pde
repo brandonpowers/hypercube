@@ -23,7 +23,7 @@ class VisualizationManager {
     private ParticleRenderer renderer;
     
     public VisualizationManager(PApplet parent) {
-        cube = new Hypercube(256, 32);
+        cube = new Hypercube(512, 64);
         audioProcessor = new AudioProcessor(parent, cube);
         timeHistory = new TimeHistoryManager(cube.NumLayers, cube.GridSize);
         renderer = new ParticleRenderer(cube);
@@ -47,9 +47,17 @@ class VisualizationManager {
 
     public void render() {
         background(0);
-        drawFrame();
-        drawFPS();
+        
+        // Draw cube frame at origin
+        stroke(255, 0, 255);
+        strokeWeight(2);
+        noFill();
+        box(cube.CubeSize);
+        
+        // Render particles
         renderer.render(timeHistory, audioProcessor.getStereoWidth());
+        
+        drawFPS();
     }
     
     private void drawFrame() {
@@ -259,43 +267,59 @@ class TimeHistoryManager {
 class ParticleRenderer {
     private Hypercube cube;
     private ParticleGrid grid;
-
-    // Default value - higher = sharper peaks
-    // Defines peak sharpness of stereo field
-    private float fieldSeparation = 3.0;  
+    private float fieldSeparation = 3.0;
+    private PGraphicsOpenGL pgl;
+    private PShader pointShader;
     
+    // Pre-allocated buffers
+    private float[] xBuffer;
+    private float[] yBuffer;
+    private float[] zBuffer;
+    private float[] sizeBuffer;
+    private float[] alphaBuffer;
+    private int[] sortIndices;
+    private int particleCount;
+    
+    // Constants
+    private static final float OPACITY_THRESHOLD = 0.05f;
+    private static final int MAX_PARTICLES = 16384;
+    private static final int SORT_BUCKET_COUNT = 32;
+
     public ParticleRenderer(Hypercube cube) {
         this.cube = cube;
         this.grid = new ParticleGrid(cube);
+        
+        // Pre-allocate buffers
+        xBuffer = new float[MAX_PARTICLES];
+        yBuffer = new float[MAX_PARTICLES];
+        zBuffer = new float[MAX_PARTICLES];
+        sizeBuffer = new float[MAX_PARTICLES];
+        alphaBuffer = new float[MAX_PARTICLES];
+        sortIndices = new int[MAX_PARTICLES];
+        
+        // Initialize OpenGL stuff
+        pgl = (PGraphicsOpenGL)g;
+        initShaders();
     }
     
-    // Adjust how distinctly the peaks are separated
+    private void initShaders() {
+        pointShader = loadShader("point.frag", "point.vert");
+        pointShader.set("pointSize", 20.0f);  // Increased from 15.0 to 20.0
+    }
+    
     public void setFieldSeparation(float separation) {
         this.fieldSeparation = separation;
     }
-    
-    public float getFieldSeparation() {
-        return fieldSeparation;
-    }
-    
+
     private float calculateStereoFieldOpacity(float position, float stereoWidth) {
-        // Convert position from 0-1 to -1 to 1 range (left to right)
-        float stereoPosition = (position * 2.0) - 1.0;
-        
-        // Calculate where the signal should be strongest based on stereo width
+        float stereoPosition = (position * 2.0f) - 1.0f;
         float peakPosition = stereoPosition < 0 ? -stereoWidth : stereoWidth;
-        
-        // Calculate distance from the peak
         float distance = abs(stereoPosition - peakPosition);
-        
-        // Use fieldSeparation to control the sharpness of the peaks
-        return max(0, 1.0 - (distance * fieldSeparation));
+        return max(0, 1.0f - (distance * fieldSeparation));
     }
     
-    public void render(TimeHistoryManager timeHistory, float stereoWidth) {
-        translate(-(cube.CubeSize / 2), -(cube.CubeSize / 2), 0);
-        noLights();
-        noStroke();
+    private void gatherVisibleParticles(TimeHistoryManager timeHistory, float stereoWidth) {
+        particleCount = 0;
         
         for (int layer = 0; layer < cube.NumLayers; layer++) {
             TimeSlice slice = timeHistory.getSlice(layer);
@@ -305,26 +329,114 @@ class ParticleRenderer {
                 float y = grid.getYPosition(row);
                 
                 for (int col = 0; col < cube.GridSize; col++) {
-                    float x = grid.getXPosition(col);
                     float size = slice.getSizeAt(row, col);
                     
                     if (size > ParticleGrid.BASE_SIZE) {
+                        float x = grid.getXPosition(col);
                         float xPos = (float)col / (cube.GridSize - 1);
                         float opacity = calculateStereoFieldOpacity(xPos, stereoWidth);
                         
-                        if (opacity > 0.05) {
-                            float alpha = 255 * opacity;
-                            fill(0, 255, 255, alpha);
-                            
-                            pushMatrix();
-                            translate(x, y, z);
-                            sphere(size);
-                            popMatrix();
+                        if (opacity > OPACITY_THRESHOLD && particleCount < MAX_PARTICLES) {
+                            xBuffer[particleCount] = x;
+                            yBuffer[particleCount] = y;
+                            zBuffer[particleCount] = z;
+                            sizeBuffer[particleCount] = size;
+                            alphaBuffer[particleCount] = opacity * 255;
+                            sortIndices[particleCount] = particleCount;
+                            particleCount++;
                         }
                     }
                 }
             }
         }
+    }
+    
+    private void sortParticles() {
+        if (particleCount == 0) return;
+        
+        // Find z-range for bucketing
+        float minZ = zBuffer[0], maxZ = zBuffer[0];
+        for (int i = 1; i < particleCount; i++) {
+            minZ = min(minZ, zBuffer[i]);
+            maxZ = max(maxZ, zBuffer[i]);
+        }
+        
+        float zRange = maxZ - minZ;
+        if (zRange < 0.0001f) return;
+        
+        // Create and clear buckets
+        @SuppressWarnings("unchecked")
+        ArrayList<Integer>[] buckets = new ArrayList[SORT_BUCKET_COUNT];
+        for (int i = 0; i < SORT_BUCKET_COUNT; i++) {
+            buckets[i] = new ArrayList<Integer>();
+        }
+        
+        // Sort into buckets back-to-front for stable transparency
+        for (int i = 0; i < particleCount; i++) {
+            int bucket = SORT_BUCKET_COUNT - 1 - 
+                        (int)((zBuffer[i] - minZ) / zRange * (SORT_BUCKET_COUNT - 1));
+            bucket = constrain(bucket, 0, SORT_BUCKET_COUNT - 1);
+            buckets[bucket].add(i);
+        }
+        
+        // Gather sorted indices
+        int idx = 0;
+        for (int i = 0; i < SORT_BUCKET_COUNT; i++) {
+            for (Integer particleIdx : buckets[i]) {
+                sortIndices[idx++] = particleIdx;
+            }
+        }
+    }
+    
+    private void renderParticleBatch() {
+        if (particleCount == 0) return;
+        
+        shader(pointShader);
+        strokeWeight(1);
+        
+        beginShape(POINTS);
+        for (int i = 0; i < particleCount; i++) {
+            int idx = sortIndices[i];
+            float alpha = alphaBuffer[idx] / 255.0f;
+            stroke(0, 255, 255, alphaBuffer[idx]);
+            strokeWeight(sizeBuffer[idx] * 2);
+            vertex(xBuffer[idx], yBuffer[idx], zBuffer[idx]);
+        }
+        endShape();
+        
+        resetShader();
+    }
+    
+    public void render(TimeHistoryManager timeHistory, float stereoWidth) {
+        pushStyle();
+        
+        // Particle rendering settings
+        hint(ENABLE_DEPTH_TEST);
+        hint(DISABLE_DEPTH_SORT);
+        blendMode(ADD);
+        ((PGraphicsOpenGL)g).smooth(4);
+        
+        // Gather and sort particles
+        gatherVisibleParticles(timeHistory, stereoWidth);
+        sortParticles();
+        
+        // Enable shader and render particles
+        shader(pointShader);
+        
+        beginShape(POINTS);
+        for (int i = 0; i < particleCount; i++) {
+            int idx = sortIndices[i];
+            float adjustedAlpha = alphaBuffer[idx] * 0.8;
+            stroke(0, 255, 255, adjustedAlpha);
+            strokeWeight(sizeBuffer[idx] * 3);
+            vertex(xBuffer[idx], yBuffer[idx], zBuffer[idx]);
+        }
+        endShape();
+        
+        // Reset state
+        resetShader();
+        blendMode(BLEND);
+        popStyle();
     }
 }
 
@@ -339,10 +451,16 @@ class ParticleGrid {
     private float[] stereoPositions;
     private float[] centerDistances;
     
+    public float getXPosition(int col) { return xPositions[col]; }
+    public float getYPosition(int row) { return yPositions[row]; }
+    public float getZPosition(int layer) { return zPositions[layer]; }
+    public float getRowFrequency(int row) { return rowFrequencies[row]; }
+    public float getCenterDistance(int col) { return centerDistances[col]; }
+
     public ParticleGrid(Hypercube cube) {
         initializeGridPositions(cube);
     }
-    
+
     private void initializeGridPositions(Hypercube cube) {
         xPositions = new float[cube.GridSize];
         yPositions = new float[cube.GridSize];
@@ -351,24 +469,21 @@ class ParticleGrid {
         stereoPositions = new float[cube.GridSize];
         centerDistances = new float[cube.GridSize];
         
+        float halfSize = cube.CubeSize / 2;
+        
         for (int i = 0; i < cube.GridSize; i++) {
-            xPositions[i] = map(i, 0, cube.GridSize - 1, 0, cube.CubeSize);
-            yPositions[i] = map(i, 0, cube.GridSize - 1, cube.CubeSize, 0);
+            // Center grid around origin
+            xPositions[i] = map(i, 0, cube.GridSize - 1, -halfSize, halfSize);
+            yPositions[i] = map(i, 0, cube.GridSize - 1, halfSize, -halfSize);
             rowFrequencies[i] = cube.YMin * pow(cube.YMax/cube.YMin, (float)i/(cube.GridSize-1));
             stereoPositions[i] = (float)i / (cube.GridSize - 1);
             centerDistances[i] = abs(stereoPositions[i] - 0.5) * 2.0;
         }
         
         for (int i = 0; i < cube.NumLayers; i++) {
-            zPositions[i] = map(i, 0, cube.NumLayers - 1, cube.CubeSize / 2, -cube.CubeSize / 2);
+            zPositions[i] = map(i, 0, cube.NumLayers - 1, halfSize, -halfSize);
         }
     }
-    
-    public float getXPosition(int col) { return xPositions[col]; }
-    public float getYPosition(int row) { return yPositions[row]; }
-    public float getZPosition(int layer) { return zPositions[layer]; }
-    public float getRowFrequency(int row) { return rowFrequencies[row]; }
-    public float getCenterDistance(int col) { return centerDistances[col]; }
 }
 
 class TimeSlice {
