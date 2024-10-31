@@ -12,8 +12,10 @@ final int LAYERS = 64;
 final float Y_MIN = 50.0f;  // Hz
 final float Y_MAX = 1000.0f; // Hz
 final int SAMPLE_RATE = 44100;
-final int BUFFER_SIZE = 1024;
-
+// Use a larger buffer size for better frequency resolution
+// 4096 gives us ~10.8Hz resolution (44100/4096) which is
+// helpful for resolution even when the yMin is 50Hz
+final int BUFFER_SIZE = 4096;
 
 VisualizationManager visManager;
 
@@ -30,8 +32,8 @@ void draw() {
 }
 
 class VisualizationManager {
-    private TestSignalAnalyzer audioAnalyzer;
-    //private AudioFileAnalyzer audioAnalyzer;
+    //private TestSignalAnalyzer audioAnalyzer;
+    private AudioFileAnalyzer audioAnalyzer;
 
     private PeasyCam cam;
     private Hypercube cube;
@@ -40,10 +42,10 @@ class VisualizationManager {
     
     public VisualizationManager(PApplet parent) {
         cube = new Hypercube(CUBE_SIZE, PARTICLES_PER_LAYER, LAYERS, Y_MIN, Y_MAX);
-        audioAnalyzer = new TestSignalAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
-        //audioAnalyzer = new AudioFileAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
-        //audioAnalyzer.loadFile("test.wav");
-        //audioAnalyzer.play(true);
+        //audioAnalyzer = new TestSignalAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
+        audioAnalyzer = new AudioFileAnalyzer(parent, cube.yMin, cube.yMax, SAMPLE_RATE, BUFFER_SIZE);
+        audioAnalyzer.loadFile("test.wav");
+        audioAnalyzer.play(true);
 
         cube.initSmoothSpectrum(audioAnalyzer.getSpecSize());
 
@@ -150,10 +152,8 @@ abstract class BaseAudioAnalyzer {
         this.yMin = yMin;
         this.yMax = yMax;
         this.sampleRate = sampleRate;
-        
-        // Use a larger buffer size for better frequency resolution
-        // 4096 gives us ~10.8Hz resolution (44100/4096)
-        this.bufferSize = 4096;
+
+        this.bufferSize = bufferSize;
         
         bufferLeft = new float[this.bufferSize];
         bufferRight = new float[this.bufferSize];
@@ -306,7 +306,7 @@ class AudioFileAnalyzer extends BaseAudioAnalyzer {
     }
 }
 
-class TestSignalAnalyzer extends BaseAudioAnalyzer {
+class TestSignalAnalyzer extends BaseAudioAnalyzer implements AudioSignal  {
     private Minim minim;
     private AudioOutput out;
     private FrequencySweeper sweeper;
@@ -318,6 +318,8 @@ class TestSignalAnalyzer extends BaseAudioAnalyzer {
         minim = new Minim(parent);
         out = minim.getLineOut(Minim.STEREO, bufferSize);
         sweeper = new FrequencySweeper(yMin, yMax, sampleRate);
+
+        out.addSignal(this);
 
         play(true);
     }
@@ -336,21 +338,54 @@ class TestSignalAnalyzer extends BaseAudioAnalyzer {
 
     @Override
     public void update() {
-        if (!isPlaying) return;
+        if (!isPlaying) {
+            return;
+        }
         
         sweeper.update(frameRate);
-        // Moving this to actually calculate it with the fft
-        //currentFrequency = sweeper.getCurrentFrequency();
-        //currentStereoWidth = sweeper.getStereoWidth();
         sweeper.generateAudioBuffer(bufferLeft, bufferRight);
         
-        // // Send audio to output
-        // for (int i = 0; i < BUFFER_SIZE; i++) {
-        //     out.left.write(bufferLeft[i]);
-        //     out.right.write(bufferRight[i]);
-        // }
+        // Send audio to output using mix.set()
+        //for (int i = 0; i < bufferSize; i++) {
+            //out.mix.set(i, (bufferLeft[i] + bufferRight[i]) * 0.5f);
+        //}
         
         processFFT(bufferLeft, bufferRight);
+    }
+
+    // AudioSignal interface methods
+    @Override
+    public void generate(float[] buffer) {
+        if (!isPlaying) {
+            Arrays.fill(buffer, 0);
+            return;
+        }
+
+        // Sum to mono and apply gain reduction
+        float gain = 0.5f;
+        for (int i = 0; i < buffer.length; i++) {
+            // Average left and right channels
+            buffer[i] = (bufferLeft[i] + bufferRight[i]) * 0.5f * gain;
+        }
+    }
+
+    // AudioSignal interface methods
+    @Override
+    public void generate(float[] left, float[] right) {
+        if (!isPlaying) {
+            Arrays.fill(left, 0);
+            Arrays.fill(right, 0);
+            return;
+        }
+
+        arrayCopy(bufferLeft, left);
+        arrayCopy(bufferRight, right);
+        //left = bufferLeft;
+        //right = bufferRight;
+        //for (int i = 0; i < left.length; i++) {
+        //  left[i] = bufferLeft[i];
+        //  right[i] = bufferRight[i];
+        //}
     }
 }
 
