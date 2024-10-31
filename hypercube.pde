@@ -102,6 +102,9 @@ class Hypercube {
     public static final float MIN_AMPLITUDE = 1e-6f;
     public static final float REF_AMPLITUDE = 1.0f;
 
+    public static final float POINT_SIZE_MIN = 2.0;
+    public static final float POINT_SIZE_MAX = 10.0;
+
     public int cubeSize = 400;
     public int numParticles = 256;
     public int gridSize = (int) sqrt(numParticles);
@@ -524,9 +527,9 @@ class TimeHistoryManager {
                 }
                 
                 // Calculate particle size
-                float particleSize = ParticleGrid.BASE_SIZE;
+                float particleSize = Hypercube.POINT_SIZE_MIN;
                 if (freqFactor > 0) {
-                    particleSize += (ParticleGrid.MAX_SIZE - ParticleGrid.BASE_SIZE) * freqFactor * stereoFactor;
+                    particleSize += (Hypercube.POINT_SIZE_MAX - Hypercube.POINT_SIZE_MIN) * freqFactor * stereoFactor;
                 }
                 
                 // Update the slice
@@ -571,7 +574,6 @@ class ParticleRenderer {
     private ParticleGrid grid;
     private float fieldSeparation = 1.7;
     private PGraphicsOpenGL pgl;
-    private PShader pointShader;
     
     // Color constants
     private static final color TOP_COLOR = #ff0088;    // Light blue
@@ -611,18 +613,12 @@ class ParticleRenderer {
         sortIndices = new int[MAX_PARTICLES];
         
         // Initialize OpenGL stuff
-        pgl = (PGraphicsOpenGL)g;
-        initShaders();
+        //pgl = (PGraphicsOpenGL)g;
         
         // Pre-calculate positions
         initializeStaticPositions();
         // Pre-calculate sort order
         preCalculateSortOrder();
-    }
-
-    private void initShaders() {
-        pointShader = loadShader("point.frag", "point.vert");
-        pointShader.set("pointSize", 20.0f);
     }
     
     private color interpolateColor(float t) {
@@ -709,7 +705,7 @@ class ParticleRenderer {
             TimeSlice slice = timeHistory.getSlice(layer);
             float size = slice.getSizeAt(row, col);
             
-            if (size > ParticleGrid.BASE_SIZE) {
+            if (size > Hypercube.POINT_SIZE_MIN) {
                 float xPos = (float)col / (cube.gridSize - 1);
                 float opacity = calculateStereoFieldOpacity(xPos, stereoWidth);
                 
@@ -734,7 +730,6 @@ class ParticleRenderer {
     private void renderParticleBatch() {
         if (particleCount == 0) return;
 
-        shader(pointShader);
         noStroke();
         
         float lastSize = -1;
@@ -784,10 +779,7 @@ class ParticleRenderer {
     }
 }
 
-class ParticleGrid {
-    public static final float BASE_SIZE = 1.0;
-    public static final float MAX_SIZE = 5.0;
-    
+class ParticleGrid {    
     private float[] xPositions;
     private float[] yPositions;
     private float[] zPositions;
