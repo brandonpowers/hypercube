@@ -677,7 +677,8 @@ class ParticleRenderer {
             }
         }
         
-        Collections.sort(positions);
+        // Changed sort order to match new z-axis direction
+        Collections.sort(positions, Collections.reverseOrder());
         
         for (int i = 0; i < positions.size(); i++) {
             staticSortIndices[i] = positions.get(i).index;
@@ -815,9 +816,9 @@ class ParticleGrid {
             centerDistances[i] = abs(stereoPositions[i] - 0.5) * 2.0;
         }
         
-        // Invert the z-positions to match the renderer
+        // Changed mapping to make particles move away (positive z)
         for (int i = 0; i < cube.numLayers; i++) {
-            zPositions[i] = map(i, 0, cube.numLayers - 1, -halfSize, halfSize);
+            zPositions[i] = map(i, 0, cube.numLayers - 1, halfSize, -halfSize);
         }
     }
 }
