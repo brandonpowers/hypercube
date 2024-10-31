@@ -21,7 +21,7 @@ VisualizationManager visManager;
 
 void setup() {
     // Can't use static vars here for some reason
-    size(1400, 1400, P3D);
+    size(2000, 1600, P3D);
     visManager = new VisualizationManager(this);
     frameRate(60);
 }
@@ -73,7 +73,7 @@ class VisualizationManager {
         background(0);
         
         // Draw cube frame at origin
-        stroke(255, 0, 255);
+        stroke(33, 33, 33);
         strokeWeight(2);
         noFill();
         box(cube.cubeSize);
@@ -569,9 +569,13 @@ class ParticlePosition implements Comparable<ParticlePosition> {
 class ParticleRenderer {
     private Hypercube cube;
     private ParticleGrid grid;
-    private float fieldSeparation = 3.0;
+    private float fieldSeparation = 1.7;
     private PGraphicsOpenGL pgl;
     private PShader pointShader;
+    
+    // Color constants
+    private static final color TOP_COLOR = #ff0088;    // Light blue
+    private static final color BOTTOM_COLOR = #1188ff; // Pink
     
     // Pre-allocated buffers
     private float[] xBuffer;
@@ -579,6 +583,7 @@ class ParticleRenderer {
     private float[] zBuffer;
     private float[] sizeBuffer;
     private float[] alphaBuffer;
+    private color[] colorBuffer;
     private int[] sortIndices;
     private int[] staticSortIndices;
     private int particleCount;
@@ -602,6 +607,7 @@ class ParticleRenderer {
         zBuffer = new float[MAX_PARTICLES];
         sizeBuffer = new float[MAX_PARTICLES];
         alphaBuffer = new float[MAX_PARTICLES];
+        colorBuffer = new color[MAX_PARTICLES];
         sortIndices = new int[MAX_PARTICLES];
         
         // Initialize OpenGL stuff
@@ -617,6 +623,22 @@ class ParticleRenderer {
     private void initShaders() {
         pointShader = loadShader("point.frag", "point.vert");
         pointShader.set("pointSize", 20.0f);
+    }
+    
+    private color interpolateColor(float t) {
+        float r1 = red(TOP_COLOR);
+        float g1 = green(TOP_COLOR);
+        float b1 = blue(TOP_COLOR);
+        
+        float r2 = red(BOTTOM_COLOR);
+        float g2 = green(BOTTOM_COLOR);
+        float b2 = blue(BOTTOM_COLOR);
+        
+        float r = lerp(r1, r2, t);
+        float g = lerp(g1, g2, t);
+        float b = lerp(b1, b2, t);
+        
+        return color(r, g, b);
     }
     
     public void setFieldSeparation(float separation) {
@@ -635,8 +657,9 @@ class ParticleRenderer {
             staticYPositions[i] = map(i, 0, cube.gridSize - 1, halfSize, -halfSize);
         }
         
+        // Invert the z-positions so newer layers (smaller indices) are closer to camera
         for (int i = 0; i < cube.numLayers; i++) {
-            staticZPositions[i] = map(i, 0, cube.numLayers - 1, halfSize, -halfSize);
+            staticZPositions[i] = map(i, 0, cube.numLayers - 1, -halfSize, halfSize);
         }
     }
 
@@ -674,6 +697,7 @@ class ParticleRenderer {
     
     private void gatherVisibleParticles(TimeHistoryManager timeHistory, float stereoWidth) {
         particleCount = 0;
+        float halfSize = cube.cubeSize / 2.0f;
         
         for (int sortedIdx : staticSortIndices) {
             int totalPerLayer = cube.gridSize * cube.gridSize;
@@ -695,6 +719,11 @@ class ParticleRenderer {
                     zBuffer[particleCount] = staticZPositions[layer];
                     sizeBuffer[particleCount] = size;
                     alphaBuffer[particleCount] = opacity * 255;
+                    
+                    // Calculate color based on y-position
+                    float yNormalized = map(staticYPositions[row], -halfSize, halfSize, 0, 1);
+                    colorBuffer[particleCount] = interpolateColor(yNormalized);
+                    
                     sortIndices[particleCount] = particleCount;
                     particleCount++;
                 }
@@ -709,6 +738,7 @@ class ParticleRenderer {
         noStroke();
         
         float lastSize = -1;
+        color lastColor = -1;
         float lastAlpha = -1;
         
         beginShape(POINTS);
@@ -717,6 +747,7 @@ class ParticleRenderer {
             
             // Only update size and color if they've changed
             float currentSize = sizeBuffer[idx] * 3;
+            color currentColor = colorBuffer[idx];
             float currentAlpha = alphaBuffer[idx] * 0.8f;
             
             if (currentSize != lastSize) {
@@ -724,8 +755,9 @@ class ParticleRenderer {
                 lastSize = currentSize;
             }
             
-            if (currentAlpha != lastAlpha) {
-                stroke(0, 255, 255, currentAlpha);
+            if (currentColor != lastColor || currentAlpha != lastAlpha) {
+                stroke(red(currentColor), green(currentColor), blue(currentColor), currentAlpha);
+                lastColor = currentColor;
                 lastAlpha = currentAlpha;
             }
             
@@ -745,7 +777,6 @@ class ParticleRenderer {
         ((PGraphicsOpenGL)g).smooth(4);
         
         gatherVisibleParticles(timeHistory, stereoWidth);
-        // Remove sortParticles() call since it's no longer needed
         renderParticleBatch();
         
         blendMode(BLEND);
@@ -785,7 +816,6 @@ class ParticleGrid {
         float halfSize = cube.cubeSize / 2;
         
         for (int i = 0; i < cube.gridSize; i++) {
-            // Center grid around origin
             xPositions[i] = map(i, 0, cube.gridSize - 1, -halfSize, halfSize);
             yPositions[i] = map(i, 0, cube.gridSize - 1, halfSize, -halfSize);
             rowFrequencies[i] = cube.yMin * pow(cube.yMax/cube.yMin, (float)i/(cube.gridSize-1));
@@ -793,8 +823,9 @@ class ParticleGrid {
             centerDistances[i] = abs(stereoPositions[i] - 0.5) * 2.0;
         }
         
+        // Invert the z-positions to match the renderer
         for (int i = 0; i < cube.numLayers; i++) {
-            zPositions[i] = map(i, 0, cube.numLayers - 1, halfSize, -halfSize);
+            zPositions[i] = map(i, 0, cube.numLayers - 1, -halfSize, halfSize);
         }
     }
 }
